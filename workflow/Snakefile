@@ -1,35 +1,41 @@
 import pandas as pd
 
-config = "config/config.yaml"
-
-rule hifiasm:
-	input: reads=config["hifi_reads"]
-	output: 
-	log: "logs/hifiasm.log"
-	params: prefix=config["prefix"]
-	conda: "envs/hifiasm.yaml"
-	threads: 32
-	resources:
-		mem_gb=200,
-		partition="himem"
-	shell: 
-		"hifiasm --primary -o {params.prefix} -t 32 {input.reads} 2> {log}"
-
-rule kmc:
-	input: reads=config["hifi_reads"]
-	output: "reads.histo"
-	log: "logs/kmc.log"
-	conda: "envs/kmc.yaml"
-	threads: 10
-	resources:
-		mem_gb=68,
-		partition="medium"
-	shell:
-		"""
-		kmc -k21 -t10 -m64 -ci1 -cs10000 {input.reads} reads kmc 2> {log}
-		kmc_tools transform kmc/reads histogram reads.histo -cx10000 2>> {log}
-		"""
+configfile: "config/config.yaml"
 
 rule all:
-	input:
-		"reads.histo"
+    input:
+        "results/reads.histo"
+
+rule kmc_count:
+    input: 
+        reads=config["hifi_reads"]
+    output: 
+        "results/reads.kmc_pre",
+        "results/reads.kmc_suf"
+    log: 
+        "logs/kmc.log"
+    conda: 
+        "envs/kmc.yaml"
+    threads: 10
+    resources:
+        mem_mb=70000,
+        partition="short"
+    shell:
+        "kmc -k21 -t10 -m64 -ci1 -cs10000 {input.reads} results/reads $TMPDIR 2> {log}"
+
+rule kmc_histo:
+    input:
+        "results/reads.kmc_pre",
+        "results/reads.kmc_suf"
+    output:
+        "results/reads.histo"
+    log:
+        "logs/kmc_histo.log"
+    conda:
+        "envs/kmc.yaml"
+    threads: 10
+    resources:
+        mem_mb=10000,
+        partition="short"
+    shell:
+        "kmc_tools transform results/reads histogram {output} -cx10000 2> {log}"
