@@ -2,9 +2,51 @@ import pandas as pd
 
 configfile: "config/config.yaml"
 
+assemblies = pd.read_csv(config["assemblies"], header=0).set_index(["assembly"], drop=False)
+
+def get_assembly_path(wildcards):
+    return assemblies["path"][wildcards.assembly]
+
+
 rule all:
     input:
-        "results/reads.histo"
+        "results/genomescope/summary.txt",
+        expand("results/{assembly}_busco/dummy.txt", assembly=assemblies["assembly"])
+
+"""
+Dead rule, was used to assembly hifiasm
+rule hifiasm:
+    input:
+        reads=config["hifi_reads"]
+    output:
+        "results/hifiasm/assembly.p_ctg.gfa"
+    log:
+        "logs/hifiasm.log"
+    conda:
+        "envs/hifiasm.yaml"
+    threads: 32
+    resources:
+        mem_mb=100000,
+        partition="long"
+    shell:
+        "hifiasm --primary -o results/hifiasm/assembly -t 32 {input.reads} 2> {log}"
+"""
+
+rule busco:
+    input:
+        get_assembly_path
+    output:
+        "results/{assembly}_busco/dummy.txt"
+    log:
+        "logs/{assembly}_busco.log"
+    conda:
+        "envs/busco.yaml"
+    threads: 1
+    resources:
+        mem_mb=8000,
+        parition="medium"
+    shell:
+        "busco -f -i {input} -l solanales_odb10 -o results/{wildcards.assembly}_busco -m genome 2> {log}"
 
 rule kmc_count:
     input: 
@@ -39,3 +81,25 @@ rule kmc_histo:
         partition="short"
     shell:
         "kmc_tools transform results/reads histogram {output} -cx10000 2> {log}"
+
+rule genomescope:
+    input:
+        "results/reads.histo"
+    output:
+        "results/genomescope/transformed_log_plot.png",
+        "results/genomescope/transformed_linear_plot.png",
+        "results/genomescope/summary.txt",
+        "results/genomescope/progress.txt",
+        "results/genomescope/model.txt",
+        "results/genomescope/log_plot.png",
+        "results/genomescope/linear_plot.png"
+    log:
+        "logs/genomescope.log"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 1
+    resources:
+        mem_mb=8000,
+        partition="short"
+    shell:
+        "genomescope2 -i {input} -o results/genomescope -k 21 2> {log}"
