@@ -1,4 +1,5 @@
 import pandas as pd
+import json
 
 configfile: "config/config.yaml"
 
@@ -7,11 +8,20 @@ assemblies = pd.read_csv(config["assemblies"], header=0).set_index(["assembly"],
 def get_assembly_path(wildcards):
     return assemblies["path"][wildcards.assembly]
 
+def human_readable(base_length):
+    i = 0
+    units = [' bp', ' kB', ' MB', ' GB', ' TB']
+    while base_length >= 1000:
+        base_length = base_length / 1000
+        i += 1
+    return (f"{round(base_length, 1)}{units[i]}")
 
 rule all:
     input:
         "results/genomescope/summary.txt",
-        expand("results/{assembly}_busco/dummy.txt", assembly=assemblies["assembly"])
+        expand("results/merfin/{assembly}_completeness.txt", assembly=assemblies["assembly"]),
+        expand("results/merfin/{assembly}_histogram.txt", assembly=assemblies["assembly"]),
+        expand("results/busco/{assembly}/short_summary.specific.solanales_odb10.{assembly}.json", assembly=assemblies["assembly"])
 
 """
 Dead rule, was used to assembly hifiasm
@@ -32,21 +42,96 @@ rule hifiasm:
         "hifiasm --primary -o results/hifiasm/assembly -t 32 {input.reads} 2> {log}"
 """
 
+rule summarise:
+    input:
+        completeness="results/merfin/{assembly}_completeness.txt",
+        busco="results/busco/{assembly}/short_summary.specific.solanales_odb10.{assembly}.json"
+    output:
+        "results/summary/{assembly}_summary.csv"
+    run:
+        with open(input.completeness) as file:
+            for line in file:
+                if line.startswith("COMPLETENESS"):
+                    summary_statistics["Completeness"] = [line.split()[1]]
+
+        with open(input.busco) as file:
+            data = json.load(file)
+            summary_statistics["# Scaffolds"] = [data["results"]["Number of scaffolds"]]
+            summary_statistics["Scaffold N50"] = [human_readable(int(data["results"]["Scaffold N50"]))]
+            summary_statistics["# Contigs"] = [data["results"]["Number of contigs"]]
+            summary_statistics["Contig N50"] = [human_readable(int(data["results"]["Contigs N50"]))]
+            summary_statistics["Total Length"] = [human_readable(int(data["results"]["Total length"]))]
+            summary_statistics["BUSCO Complete"] = [data["results"]["Complete"]]
+         
+
 rule busco:
     input:
         get_assembly_path
     output:
-        "results/{assembly}_busco/dummy.txt"
+        "results/busco/{assembly}/run_solanales_odb10/short_summary.txt"
     log:
-        "logs/{assembly}_busco.log"
+        "logs/busco/{assembly}.log"
     conda:
         "envs/busco.yaml"
-    threads: 1
+    params:
+        "results/busco/{assembly}"
+    threads: 8
     resources:
         mem_mb=8000,
         parition="medium"
     shell:
-        "busco -f -i {input} -l solanales_odb10 -o results/{wildcards.assembly}_busco -m genome 2> {log}"
+        "busco -f -c 8 -i {input} -l solanales_odb10 -o {params} -m genome 2> {log}"
+
+rule completeness:
+    input:
+        assembly=get_assembly_path,
+        lookup="results/genomescope/lookup_table.txt",
+        readmers="results/reads.meryl"
+    output:
+        "results/merfin/{assembly}_completeness.txt"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 24
+    resources:
+        mem_mb=64000,
+        partition="medium"
+    shell:
+        "merfin -completeness -sequence {input.assembly} -readmers {input.readmers} -prob {input.lookup} -peak 48.8 2> {output}"
+
+rule histogram:
+    input:
+        assembly=get_assembly_path,
+        lookup="results/genomescope/lookup_table.txt",
+        readmers="results/reads.meryl"
+    output:
+        "results/merfin/{assembly}_histogram.txt"
+    log:
+        "logs/merfin/{assembly}_histogram.txt"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 24
+    resources:
+        mem_mb=64000,
+        partition="medium"
+    shell:
+        "merfin -hist -sequence {input.assembly} -readmers {input.readmers} -prob {input.lookup} -peak 48.8 -output {output} 2> {log}"
+
+
+rule meryl:
+    input:
+        reads=config["hifi_reads"]
+    output:
+        directory("results/reads.meryl")
+    log:
+        "logs/meryl.log"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 12
+    resources:
+        mem_mb=32000,
+        partition="medium"
+    shell:
+        "meryl count k=21 {input.reads} output {output} 2> {log}"
 
 rule kmc_count:
     input: 
@@ -92,7 +177,8 @@ rule genomescope:
         "results/genomescope/progress.txt",
         "results/genomescope/model.txt",
         "results/genomescope/log_plot.png",
-        "results/genomescope/linear_plot.png"
+        "results/genomescope/linear_plot.png",
+        "results/genomescope/lookup_table.txt"
     log:
         "logs/genomescope.log"
     conda:
@@ -102,4 +188,4 @@ rule genomescope:
         mem_mb=8000,
         partition="short"
     shell:
-        "genomescope2 -i {input} -o results/genomescope -k 21 2> {log}"
+        "genomescope2 --fitted_hist -i {input} -o results/genomescope -k 21 2> {log}"

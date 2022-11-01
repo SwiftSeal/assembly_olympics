@@ -1,5 +1,4 @@
 channels:
  - bioconda
 dependencies:
- - genomescope2
  - merfin
