@@ -1,0 +1,3 @@
+hifi_reads: "path.fastq.gz"
+assemblies: "config/assemblies.csv"
+busco_lineage: "solanales_odb10"
