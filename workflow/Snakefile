@@ -1,5 +1,7 @@
 import pandas as pd
 import json
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 configfile: "config/config.yaml"
 
@@ -19,40 +21,23 @@ def human_readable(base_length):
 rule all:
     input:
         "results/genomescope/summary.txt",
-        expand("results/merfin/{assembly}_histogram.txt", assembly=assemblies["assembly"]),
+        "results/histogram.png",
         "results/summary/summary_table.csv"
-
-"""
-Dead rule, was used to assembly hifiasm
-rule hifiasm:
-    input:
-        reads=config["hifi_reads"]
-    output:
-        "results/hifiasm/assembly.p_ctg.gfa"
-    log:
-        "logs/hifiasm.log"
-    conda:
-        "envs/hifiasm.yaml"
-    threads: 32
-    resources:
-        mem_mb=100000,
-        partition="long"
-    shell:
-        "hifiasm --primary -o results/hifiasm/assembly -t 32 {input.reads} 2> {log}"
-"""
 
 rule complete_summary:
     input:
         expand("results/summary/{assembly}_summary.csv", assembly=assemblies["assembly"])
     output:
-        "results/summary/summary_table.csv"
+        csv="results/summary/summary_table.csv"
     run:
         dfs = []
+
         for csv in input:
             df = pd.read_csv(csv)
             dfs.append(df)
-        dfs_concat = pd.concat(dfs), ignore_index = True)
-        dfs_concat.to_csv(output, index = False)
+        
+        dfs_concat = pd.concat(dfs, ignore_index = True)
+        dfs_concat.to_csv(output.csv, index = False)
 
 rule summarise:
     input:
@@ -149,8 +134,28 @@ rule histogram:
         mem_mb=64000,
         partition="medium"
     shell:
-        "merfin -hist -sequence {input.assembly} -readmers {input.readmers} -prob {input.lookup} -peak 48.8 -output {output} 2> {log}"
+        """
+        merfin -hist -sequence {input.assembly} -readmers {input.readmers} -prob {input.lookup} -peak 48.8 -output {output} 2> {log}
+        sed -i 's/$/\t{wildcards.assembly}/' {output}
+        """
 
+rule histogram_plot:
+    input:
+        expand("results/merfin/{assembly}_histogram.txt", assembly=assemblies["assembly"])
+    output:
+        plot="results/histogram.png"
+    run:
+        frames = []
+        for file in input:
+            frames.append(pd.read_table(file, header = None))
+
+        df = pd.concat(frames)
+        df = df.rename(columns = {0: 'x', 1: 'weight', 2: 'method'})
+        df = df.reset_index()
+        sns.kdeplot(data = df, x = "x", weights = "weight", hue = "method", gridsize=10000)
+        plt.xlim(-100, 100)
+        plt.xlabel("K*")
+        plt.savefig(output.plot)
 
 rule meryl:
     input:
