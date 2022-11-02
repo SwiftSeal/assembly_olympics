@@ -1,5 +1,7 @@
-config/config.yaml
+config/*
 .snakemake
 kmc
 logs
 slurm*
+results/
+logs/

@@ -1,10 +1,177 @@
 import pandas as pd
+import json
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 configfile: "config/config.yaml"
 
+assemblies = pd.read_csv(config["assemblies"], header=0).set_index(["assembly"], drop=False)
+
+def get_assembly_path(wildcards):
+    return assemblies["path"][wildcards.assembly]
+
+def human_readable(base_length):
+    i = 0
+    units = [' bp', ' kB', ' MB', ' GB', ' TB']
+    while base_length >= 1000:
+        base_length = base_length / 1000
+        i += 1
+    return (f"{round(base_length, 1)}{units[i]}")
+
 rule all:
     input:
-        "results/reads.histo"
+        "results/genomescope/summary.txt",
+        "results/histogram.png",
+        "results/summary/summary_table.csv"
+
+rule complete_summary:
+    input:
+        expand("results/summary/{assembly}_summary.csv", assembly=assemblies["assembly"])
+    output:
+        csv="results/summary/summary_table.csv"
+    run:
+        dfs = []
+
+        for csv in input:
+            df = pd.read_csv(csv)
+            dfs.append(df)
+        
+        dfs_concat = pd.concat(dfs, ignore_index = True)
+        dfs_concat.to_csv(output.csv, index = False)
+
+rule summarise:
+    input:
+        completeness="results/merfin/{assembly}_completeness.txt",
+        busco=expand("results/busco/{{assembly}}/short_summary.specific.{lineage}.{{assembly}}.json", lineage=config["busco_lineage"])
+    output:
+        csv="results/summary/{assembly}_summary.csv"
+    run:
+        summary_statistics = {}
+        with open(input.completeness) as file:
+            for line in file:
+                if line.startswith("COMPLETENESS"):
+                    summary_statistics["Completeness"] = [line.split()[1]]
+
+        with open(input.busco[0]) as file:
+            data = json.load(file)
+            summary_statistics["# Scaffolds"] = [data["results"]["Number of scaffolds"]]
+            summary_statistics["Scaffold N50"] = [human_readable(int(data["results"]["Scaffold N50"]))]
+            summary_statistics["# Contigs"] = [data["results"]["Number of contigs"]]
+            summary_statistics["Contig N50"] = [human_readable(int(data["results"]["Contigs N50"]))]
+            summary_statistics["Total Length"] = [human_readable(int(data["results"]["Total length"]))]
+            summary_statistics["BUSCO Complete"] = [data["results"]["Complete"]]
+
+        summary_statistics["assembly"] = [wildcards.assembly]
+        
+        summary_df = pd.DataFrame.from_dict(summary_statistics)
+        summary_df.to_csv(output.csv, index = False)
+         
+rule busco_lineage:
+    output:
+        "busco_downloads/file_versions.tsv"
+    log:
+        "logs/busco/download_lineage.log"
+    conda:
+        "envs/busco.yaml"
+    params:
+        lineage=config["busco_lineage"]
+    threads: 1
+    resources:
+        mem_mb=8000,
+        partition="medium"
+    shell:
+        "busco --download {params.lineage} 2> {log}"
+
+rule busco:
+    input:
+        path=get_assembly_path,
+        buscofile="busco_downloads/file_versions.tsv"
+    output:
+        expand("results/busco/{{assembly}}/short_summary.specific.{lineage}.{{assembly}}.json", lineage=config["busco_lineage"])
+    log:
+        "logs/busco/{assembly}.log"
+    conda:
+        "envs/busco.yaml"
+    params:
+        path="results/busco/{assembly}",
+        lineage=config["busco_lineage"]
+    threads: 8
+    resources:
+        mem_mb=8000,
+        parition="medium"
+    shell:
+        "busco -f -c 8 -i {input.path} -l {params.lineage} -o {params.path} -m genome 2> {log}"
+
+rule completeness:
+    input:
+        assembly=get_assembly_path,
+        lookup="results/genomescope/lookup_table.txt",
+        readmers="results/reads.meryl"
+    output:
+        "results/merfin/{assembly}_completeness.txt"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 24
+    resources:
+        mem_mb=64000,
+        partition="medium"
+    shell:
+        "merfin -completeness -sequence {input.assembly} -readmers {input.readmers} -prob {input.lookup} -peak 48.8 2> {output}"
+
+rule histogram:
+    input:
+        assembly=get_assembly_path,
+        lookup="results/genomescope/lookup_table.txt",
+        readmers="results/reads.meryl"
+    output:
+        "results/merfin/{assembly}_histogram.txt"
+    log:
+        "logs/merfin/{assembly}_histogram.txt"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 24
+    resources:
+        mem_mb=64000,
+        partition="medium"
+    shell:
+        """
+        merfin -hist -sequence {input.assembly} -readmers {input.readmers} -prob {input.lookup} -peak 48.8 -output {output} 2> {log}
+        sed -i 's/$/\t{wildcards.assembly}/' {output}
+        """
+
+rule histogram_plot:
+    input:
+        expand("results/merfin/{assembly}_histogram.txt", assembly=assemblies["assembly"])
+    output:
+        plot="results/histogram.png"
+    run:
+        frames = []
+        for file in input:
+            frames.append(pd.read_table(file, header = None))
+
+        df = pd.concat(frames)
+        df = df.rename(columns = {0: 'x', 1: 'weight', 2: 'method'})
+        df = df.reset_index()
+        sns.kdeplot(data = df, x = "x", weights = "weight", hue = "method", gridsize=10000)
+        plt.xlim(-100, 100)
+        plt.xlabel("K*")
+        plt.savefig(output.plot)
+
+rule meryl:
+    input:
+        reads=config["hifi_reads"]
+    output:
+        directory("results/reads.meryl")
+    log:
+        "logs/meryl.log"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 12
+    resources:
+        mem_mb=32000,
+        partition="medium"
+    shell:
+        "meryl count k=21 {input.reads} output {output} 2> {log}"
 
 rule kmc_count:
     input: 
@@ -39,3 +206,26 @@ rule kmc_histo:
         partition="short"
     shell:
         "kmc_tools transform results/reads histogram {output} -cx10000 2> {log}"
+
+rule genomescope:
+    input:
+        "results/reads.histo"
+    output:
+        "results/genomescope/transformed_log_plot.png",
+        "results/genomescope/transformed_linear_plot.png",
+        "results/genomescope/summary.txt",
+        "results/genomescope/progress.txt",
+        "results/genomescope/model.txt",
+        "results/genomescope/log_plot.png",
+        "results/genomescope/linear_plot.png",
+        "results/genomescope/lookup_table.txt"
+    log:
+        "logs/genomescope.log"
+    conda:
+        "envs/genomescope.yaml"
+    threads: 1
+    resources:
+        mem_mb=8000,
+        partition="short"
+    shell:
+        "genomescope2 --fitted_hist -i {input} -o results/genomescope -k 21 2> {log}"
