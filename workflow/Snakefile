@@ -19,9 +19,8 @@ def human_readable(base_length):
 rule all:
     input:
         "results/genomescope/summary.txt",
-        expand("results/merfin/{assembly}_completeness.txt", assembly=assemblies["assembly"]),
         expand("results/merfin/{assembly}_histogram.txt", assembly=assemblies["assembly"]),
-        expand("results/busco/{assembly}/short_summary.specific.solanales_odb10.{assembly}.json", assembly=assemblies["assembly"])
+        "results/summary/summary_table.csv"
 
 """
 Dead rule, was used to assembly hifiasm
@@ -42,19 +41,33 @@ rule hifiasm:
         "hifiasm --primary -o results/hifiasm/assembly -t 32 {input.reads} 2> {log}"
 """
 
+rule complete_summary:
+    input:
+        expand("results/summary/{assembly}_summary.csv", assembly=assemblies["assembly"])
+    output:
+        "results/summary/summary_table.csv"
+    run:
+        dfs = []
+        for csv in input:
+            df = pd.read_csv(csv)
+            dfs.append(df)
+        dfs_concat = pd.concat(dfs), ignore_index = True)
+        dfs_concat.to_csv(output, index = False)
+
 rule summarise:
     input:
         completeness="results/merfin/{assembly}_completeness.txt",
-        busco="results/busco/{assembly}/short_summary.specific.solanales_odb10.{assembly}.json"
+        busco=expand("results/busco/{{assembly}}/short_summary.specific.{lineage}.{{assembly}}.json", lineage=config["busco_lineage"])
     output:
-        "results/summary/{assembly}_summary.csv"
+        csv="results/summary/{assembly}_summary.csv"
     run:
+        summary_statistics = {}
         with open(input.completeness) as file:
             for line in file:
                 if line.startswith("COMPLETENESS"):
                     summary_statistics["Completeness"] = [line.split()[1]]
 
-        with open(input.busco) as file:
+        with open(input.busco[0]) as file:
             data = json.load(file)
             summary_statistics["# Scaffolds"] = [data["results"]["Number of scaffolds"]]
             summary_statistics["Scaffold N50"] = [human_readable(int(data["results"]["Scaffold N50"]))]
@@ -62,25 +75,47 @@ rule summarise:
             summary_statistics["Contig N50"] = [human_readable(int(data["results"]["Contigs N50"]))]
             summary_statistics["Total Length"] = [human_readable(int(data["results"]["Total length"]))]
             summary_statistics["BUSCO Complete"] = [data["results"]["Complete"]]
+
+        summary_statistics["assembly"] = [wildcards.assembly]
+        
+        summary_df = pd.DataFrame.from_dict(summary_statistics)
+        summary_df.to_csv(output.csv, index = False)
          
+rule busco_lineage:
+    output:
+        "busco_downloads/file_versions.tsv"
+    log:
+        "logs/busco/download_lineage.log"
+    conda:
+        "envs/busco.yaml"
+    params:
+        lineage=config["busco_lineage"]
+    threads: 1
+    resources:
+        mem_mb=8000,
+        partition="medium"
+    shell:
+        "busco --download {params.lineage} 2> {log}"
 
 rule busco:
     input:
-        get_assembly_path
+        path=get_assembly_path,
+        buscofile="busco_downloads/file_versions.tsv"
     output:
-        "results/busco/{assembly}/run_solanales_odb10/short_summary.txt"
+        expand("results/busco/{{assembly}}/short_summary.specific.{lineage}.{{assembly}}.json", lineage=config["busco_lineage"])
     log:
         "logs/busco/{assembly}.log"
     conda:
         "envs/busco.yaml"
     params:
-        "results/busco/{assembly}"
+        path="results/busco/{assembly}",
+        lineage=config["busco_lineage"]
     threads: 8
     resources:
         mem_mb=8000,
         parition="medium"
     shell:
-        "busco -f -c 8 -i {input} -l solanales_odb10 -o {params} -m genome 2> {log}"
+        "busco -f -c 8 -i {input.path} -l {params.lineage} -o {params.path} -m genome 2> {log}"
 
 rule completeness:
     input:
